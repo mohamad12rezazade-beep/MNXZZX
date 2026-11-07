@@ -91,16 +91,22 @@ def ensure_table():
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id bigint;")
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();")
 
-            # حل مشکل ستون gift اگه وجود داشت
+            # برداشتن NOT NULL از همه ستون‌هایی که ما پر نمی‌کنیم
             cur.execute("""
                 DO $$
+                DECLARE
+                    col record;
                 BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='orders' AND column_name='gift'
-                    ) THEN
-                        ALTER TABLE orders ALTER COLUMN gift DROP NOT NULL;
-                    END IF;
+                    FOR col IN
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'orders'
+                          AND is_nullable = 'NO'
+                          AND column_default IS NULL
+                          AND column_name NOT IN ('id', 'user_id', 'type', 'amount')
+                    LOOP
+                        EXECUTE format('ALTER TABLE orders ALTER COLUMN %I DROP NOT NULL;', col.column_name);
+                    END LOOP;
                 END $$;
             """)
 
@@ -412,8 +418,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         res = db_query(
-            "INSERT INTO orders (user_id, type, amount, total_toman, wallet_address, status, gift) "
-            "VALUES (%s, %s, %s, %s, %s, 'pending', '') RETURNING id",
+            "INSERT INTO orders (user_id, type, amount, total_toman, wallet_address, status) "
+            "VALUES (%s, %s, %s, %s, %s, 'pending') RETURNING id",
             (
                 chat_id,
                 user_data["type"],
