@@ -44,7 +44,6 @@ except ValueError:
 
 CARD_NUMBER = "6219861856357990"
 
-# ---------- تنظیمات قیمت ----------
 TON_FEE_PER_UNIT = 22000
 DOGS_PRICE_PER_UNIT = 2000
 
@@ -91,6 +90,20 @@ def ensure_table():
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending';")
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id bigint;")
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();")
+
+            # حل مشکل ستون gift اگه وجود داشت
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='orders' AND column_name='gift'
+                    ) THEN
+                        ALTER TABLE orders ALTER COLUMN gift DROP NOT NULL;
+                    END IF;
+                END $$;
+            """)
+
             conn.commit()
             logging.info("✅ جدول orders آماده است")
     finally:
@@ -399,8 +412,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         res = db_query(
-            "INSERT INTO orders (user_id, type, amount, total_toman, wallet_address, status) "
-            "VALUES (%s, %s, %s, %s, %s, 'pending') RETURNING id",
+            "INSERT INTO orders (user_id, type, amount, total_toman, wallet_address, status, gift) "
+            "VALUES (%s, %s, %s, %s, %s, 'pending', '') RETURNING id",
             (
                 chat_id,
                 user_data["type"],
