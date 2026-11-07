@@ -1,7 +1,7 @@
 name: Run Bot (Manual)
 
 on:
-  workflow_dispatch:   # فقط دستی از تب Actions
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -23,6 +23,5 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           ADMIN_ID: ${{ secrets.ADMIN_ID }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python main.py
