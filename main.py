@@ -1,6 +1,7 @@
 import os
 import logging
-from datetime import datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from telegram import (
     Update,
@@ -17,21 +18,50 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from supabase import create_client
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# ---------- خواندن متغیرها ----------
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_ID_RAW = os.getenv("ADMIN_ID", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+if not BOT_TOKEN:
+    raise SystemExit("❌ BOT_TOKEN تنظیم نشده!")
+if not ADMIN_ID_RAW:
+    raise SystemExit("❌ ADMIN_ID تنظیم نشده!")
+if not DATABASE_URL:
+    raise SystemExit("❌ DATABASE_URL تنظیم نشده!")
+
+try:
+    ADMIN_ID = int(ADMIN_ID_RAW)
+except ValueError:
+    raise SystemExit("❌ ADMIN_ID باید عدد باشه")
+
 CARD_NUMBER = "6219861856357990"
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# وضعیت کاربران در حافظه
 user_state = {}
+
+
+# ---------- اتصال دیتابیس ----------
+def db():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+
+def db_query(sql, params=None, fetch=False):
+    conn = db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params or ())
+            if fetch:
+                result = cur.fetchall()
+            else:
+                result = None
+            conn.commit()
+            return result
+    finally:
+        conn.close()
 
 
 # ---------- کیبوردها ----------
@@ -145,11 +175,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat_id != ADMIN_ID:
             return
         order_id = data.split("_")[1]
-        supabase.table("orders").update({"status": "approved"}).eq("id", order_id).execute()
-        res = supabase.table("orders").select("user_id").eq("id", order_id).execute()
-        if res.data:
+        db_query("UPDATE orders SET status=%s WHERE id=%s", ("approved", order_id))
+        res = db_query("SELECT user_id FROM orders WHERE id=%s", (order_id,), fetch=True)
+        if res:
             await context.bot.send_message(
-                res.data[0]["user_id"],
+                res[0]["user_id"],
                 "✅ واریز شما تایید شد و سفارش در حال انجام است.",
             )
         await query.edit_message_caption("✅ تایید شد")
@@ -159,11 +189,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat_id != ADMIN_ID:
             return
         order_id = data.split("_")[1]
-        supabase.table("orders").update({"status": "rejected"}).eq("id", order_id).execute()
-        res = supabase.table("orders").select("user_id").eq("id", order_id).execute()
-        if res.data:
+        db_query("UPDATE orders SET status=%s WHERE id=%s", ("rejected", order_id))
+        res = db_query("SELECT user_id FROM orders WHERE id=%s", (order_id,), fetch=True)
+        if res:
             await context.bot.send_message(
-                res.data[0]["user_id"],
+                res[0]["user_id"],
                 "❌ متأسفانه رسید شما رد شد. لطفاً با پشتیبانی در تماس باشید.",
             )
         await query.edit_message_caption("❌ رد شد")
@@ -191,20 +221,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "📜 خرید ها":
-        res = (
-            supabase.table("orders")
-            .select("*")
-            .eq("user_id", chat_id)
-            .eq("status", "approved")
-            .order("created_at", desc=True)
-            .execute()
+        res = db_query(
+            "SELECT * FROM orders WHERE user_id=%s AND status='approved' ORDER BY created_at DESC",
+            (chat_id,),
+            fetch=True,
         )
-        if not res.data:
+        if not res:
             await update.message.reply_text("شما هیچ خرید تایید شده‌ای ندارید.")
             return
         msg = "📜 خریدهای تایید شده شما:\n\n"
-        for o in res.data:
-            msg += f"🔹 {o['type']} - مقدار: {o['amount']} - تاریخ: {o['created_at'][:10]}\n"
+        for o in res:
+            msg += f"🔹 {o['type']} - مقدار: {o['amount']} - تاریخ: {str(o['created_at'])[:10]}\n"
         await update.message.reply_text(msg)
         return
 
@@ -287,27 +314,25 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = state["data"]
 
     try:
-        res = (
-            supabase.table("orders")
-            .insert(
-                {
-                    "user_id": chat_id,
-                    "type": user_data["type"],
-                    "amount": user_data["amount"],
-                    "wallet_address": user_data.get("wallet"),
-                    "status": "pending",
-                }
-            )
-            .execute()
+        res = db_query(
+            "INSERT INTO orders (user_id, type, amount, wallet_address, status) "
+            "VALUES (%s, %s, %s, %s, 'pending') RETURNING id",
+            (
+                chat_id,
+                user_data["type"],
+                user_data["amount"],
+                user_data.get("wallet"),
+            ),
+            fetch=True,
         )
-        order = res.data[0]
+        order_id = res[0]["id"]
     except Exception as e:
         logging.error(f"خطا در ثبت سفارش: {e}")
         await update.message.reply_text("❌ خطا در ثبت سفارش.")
         return
 
     caption = (
-        f"📥 سفارش جدید #{order['id']}\n"
+        f"📥 سفارش جدید #{order_id}\n"
         f"👤 کاربر: {update.message.from_user.first_name} ({chat_id})\n"
         f"📦 نوع: {user_data['type']}\n"
         f"🔢 مقدار: {user_data['amount']}\n"
@@ -320,8 +345,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ تایید", callback_data=f"approve_{order['id']}"),
-                InlineKeyboardButton("❌ رد", callback_data=f"reject_{order['id']}"),
+                InlineKeyboardButton("✅ تایید", callback_data=f"approve_{order_id}"),
+                InlineKeyboardButton("❌ رد", callback_data=f"reject_{order_id}"),
             ]
         ]
     )
