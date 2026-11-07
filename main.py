@@ -1,6 +1,7 @@
 import os
 import logging
 import psycopg2
+import requests
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from telegram import (
@@ -41,6 +42,11 @@ except ValueError:
 
 CARD_NUMBER = "6219861856357990"
 
+# ---------- تنظیمات قیمت ----------
+TON_FEE_PER_UNIT = 22000      # تومان کارمزد به ازای هر ۱ تون
+DOGS_PRICE_PER_UNIT = 2000    # تومان به ازای هر ۱ داگز
+USD_TO_TOMAN = 60000          # نرخ دلار به تومن (دستی)
+
 user_state = {}
 
 
@@ -54,14 +60,36 @@ def db_query(sql, params=None, fetch=False):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params or ())
-            if fetch:
-                result = cur.fetchall()
-            else:
-                result = None
+            result = cur.fetchall() if fetch else None
             conn.commit()
             return result
     finally:
         conn.close()
+
+
+# ---------- قیمت ----------
+def get_price_usd(coin_id: str) -> float:
+    try:
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        return float(r.json()[coin_id]["usd"])
+    except Exception as e:
+        logging.error(f"خطا در گرفتن قیمت {coin_id}: {e}")
+        return 0.0
+
+
+def calc_ton_price(amount_ton: float) -> int:
+    usd = get_price_usd("the-open-network")
+    if usd <= 0:
+        raise ValueError("قیمت تون دریافت نشد")
+    ton_toman = usd * USD_TO_TOMAN
+    per_ton = ton_toman + TON_FEE_PER_UNIT
+    return int(per_ton * amount_ton)
+
+
+def calc_dogs_price(amount_dogs: int) -> int:
+    return int(amount_dogs * DOGS_PRICE_PER_UNIT)
 
 
 # ---------- کیبوردها ----------
@@ -231,7 +259,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         msg = "📜 خریدهای تایید شده شما:\n\n"
         for o in res:
-            msg += f"🔹 {o['type']} - مقدار: {o['amount']} - تاریخ: {str(o['created_at'])[:10]}\n"
+            msg += (
+                f"🔹 {o['type']} - مقدار: {o['amount']} - مبلغ: {o.get('total_toman', 0):,} تومان - تاریخ: {str(o['created_at'])[:10]}\n"
+            )
         await update.message.reply_text(msg)
         return
 
@@ -250,16 +280,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount < 0.1:
             await update.message.reply_text("❌ حداقل ۰.۱ تون وارد کنید.")
             return
-        state["data"] = {"amount": amount, "type": "TON"}
+
+        try:
+            total = calc_ton_price(amount)
+        except ValueError as e:
+            await update.message.reply_text(f"❌ {e}. بعداً تلاش کنید.")
+            return
+
+        state["data"] = {"amount": amount, "type": "TON", "total_toman": total}
         state["step"] = "WAIT_TON_WALLET"
-        await update.message.reply_text("💼 لطفاً آدرس ولت خود را وارد کنید:")
+        await update.message.reply_text(
+            f"💎 مقدار: {amount} تون\n"
+            f"💰 مبلغ قابل پرداخت: {total:,} تومان\n\n"
+            f"💼 لطفاً آدرس ولت خود را وارد کنید:"
+        )
         return
 
     if step == "WAIT_TON_WALLET":
         state["data"]["wallet"] = text
         state["step"] = "WAIT_RECEIPT"
+        total = state["data"]["total_toman"]
         await update.message.reply_text(
-            f"💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\n<code>{CARD_NUMBER}</code>\n\nسپس تصویر رسید را ارسال کنید.",
+            f"💳 لطفاً مبلغ <b>{total:,} تومان</b> را به شماره کارت زیر واریز کنید:\n\n"
+            f"<code>{CARD_NUMBER}</code>\n\n"
+            f"سپس تصویر رسید را ارسال کنید.",
             parse_mode="HTML",
         )
         return
@@ -273,16 +317,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount < 1000:
             await update.message.reply_text("❌ حداقل ۱۰۰۰ داگز وارد کنید.")
             return
-        state["data"] = {"amount": amount, "type": "DOGS"}
+
+        total = calc_dogs_price(amount)
+        state["data"] = {"amount": amount, "type": "DOGS", "total_toman": total}
         state["step"] = "WAIT_DOGS_USERNAME"
-        await update.message.reply_text("🆔 لطفاً آیدی یوزرنیم خود را وارد کنید (مثلاً @username):")
+        await update.message.reply_text(
+            f"🐕 مقدار: {amount:,} داگز\n"
+            f"💰 مبلغ قابل پرداخت: {total:,} تومان\n\n"
+            f"🆔 لطفاً آیدی یوزرنیم خود را وارد کنید (مثلاً @username):"
+        )
         return
 
     if step == "WAIT_DOGS_USERNAME":
         state["data"]["username"] = text
         state["step"] = "WAIT_RECEIPT"
+        total = state["data"]["total_toman"]
         await update.message.reply_text(
-            f"💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\n<code>{CARD_NUMBER}</code>\n\nسپس تصویر رسید را ارسال کنید.",
+            f"💳 لطفاً مبلغ <b>{total:,} تومان</b> را به شماره کارت زیر واریز کنید:\n\n"
+            f"<code>{CARD_NUMBER}</code>\n\n"
+            f"سپس تصویر رسید را ارسال کنید.",
             parse_mode="HTML",
         )
         return
@@ -315,20 +368,21 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         res = db_query(
-            "INSERT INTO orders (user_id, type, amount, wallet_address, status) "
-            "VALUES (%s, %s, %s, %s, 'pending') RETURNING id",
+            "INSERT INTO orders (user_id, type, amount, total_toman, wallet_address, status) "
+            "VALUES (%s, %s, %s, %s, %s, 'pending') RETURNING id",
             (
                 chat_id,
                 user_data["type"],
                 user_data["amount"],
+                user_data.get("total_toman", 0),
                 user_data.get("wallet"),
             ),
             fetch=True,
         )
         order_id = res[0]["id"]
     except Exception as e:
-        logging.error(f"خطا در ثبت سفارش: {e}")
-        await update.message.reply_text("❌ خطا در ثبت سفارش.")
+        logging.exception("خطا در ثبت سفارش")
+        await update.message.reply_text(f"❌ خطا در ثبت سفارش:\n{e}")
         return
 
     caption = (
@@ -336,6 +390,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 کاربر: {update.message.from_user.first_name} ({chat_id})\n"
         f"📦 نوع: {user_data['type']}\n"
         f"🔢 مقدار: {user_data['amount']}\n"
+        f"💰 مبلغ: {user_data.get('total_toman', 0):,} تومان\n"
     )
     if user_data["type"] == "TON":
         caption += f"💼 ولت: {user_data['wallet']}"
