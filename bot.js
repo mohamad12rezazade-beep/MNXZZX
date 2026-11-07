@@ -1,16 +1,24 @@
+import "dotenv/config";
 import TelegramBot from "node-telegram-bot-api";
-import { createClient } from "@supabase/supabase-js";
+import pg from "pg";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const DATABASE_URL = process.env.DATABASE_URL;
 const CARD_NUMBER = "6219861856357990";
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+if (!BOT_TOKEN || !ADMIN_ID || !DATABASE_URL) {
+  console.error("❌ متغیرهای .env کامل نیست!");
+  process.exit(1);
+}
 
-// وضعیت کاربران در حافظه
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+const pool = new pg.Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
 const userState = {};
 
 // ---------- کیبوردها ----------
@@ -43,7 +51,6 @@ async function checkMembership(userId) {
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
 
-  // مرحله ۱: شماره
   if (!userState[chatId]?.phoneVerified) {
     return bot.sendMessage(
       chatId,
@@ -52,7 +59,6 @@ bot.onText(/\/start/, async (msg) => {
     );
   }
 
-  // مرحله ۲: عضویت
   const isMember = await checkMembership(chatId);
   if (!isMember) {
     return bot.sendMessage(
@@ -70,7 +76,6 @@ bot.onText(/\/start/, async (msg) => {
     );
   }
 
-  // مرحله ۳: منو
   bot.sendMessage(chatId, "🏠 منوی اصلی:", { reply_markup: mainKeyboard });
 });
 
@@ -89,7 +94,7 @@ bot.on("contact", async (msg) => {
   bot.sendMessage(chatId, "✅ شماره تایید شد.\nحالا برای ادامه /start را بزنید.");
 });
 
-// ---------- دکمه عضو شدم ----------
+// ---------- callback ها ----------
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
 
@@ -107,43 +112,43 @@ bot.on("callback_query", async (query) => {
     }
   }
 
-  // تایید/رد سفارش توسط ادمین
+  if (query.data === "buy_ton") {
+    userState[chatId] = { step: "WAIT_TON_AMOUNT" };
+    bot.answerCallbackQuery(query.id);
+    bot.sendMessage(chatId, "🔢 تعداد تون را وارد کنید (حداقل ۰.۱):");
+  }
+
+  if (query.data === "buy_dogs") {
+    userState[chatId] = { step: "WAIT_DOGS_AMOUNT" };
+    bot.answerCallbackQuery(query.id);
+    bot.sendMessage(chatId, "🔢 تعداد داگز را وارد کنید (حداقل ۱۰۰۰):");
+  }
+
   if (query.data.startsWith("approve_")) {
     if (chatId !== ADMIN_ID) return;
     const orderId = query.data.split("_")[1];
-    await supabase.from("orders").update({ status: "approved" }).eq("id", orderId);
-    const { data: order } = await supabase.from("orders").select("user_id").eq("id", orderId).single();
-    if (order) {
-      bot.sendMessage(order.user_id, "✅ واریز شما تایید شد و سفارش در حال انجام است.");
-    }
-    bot.editMessageCaption("✅ تایید شد", {
-      chat_id: chatId,
-      message_id: query.message.message_id,
-    });
+    await pool.query("UPDATE orders SET status=$1 WHERE id=$2", ["approved", orderId]);
+    const { rows } = await pool.query("SELECT user_id FROM orders WHERE id=$1", [orderId]);
+    if (rows[0]) bot.sendMessage(rows[0].user_id, "✅ واریز شما تایید شد و سفارش در حال انجام است.");
+    bot.editMessageCaption("✅ تایید شد", { chat_id: chatId, message_id: query.message.message_id });
   }
 
   if (query.data.startsWith("reject_")) {
     if (chatId !== ADMIN_ID) return;
     const orderId = query.data.split("_")[1];
-    await supabase.from("orders").update({ status: "rejected" }).eq("id", orderId);
-    const { data: order } = await supabase.from("orders").select("user_id").eq("id", orderId).single();
-    if (order) {
-      bot.sendMessage(order.user_id, "❌ متأسفانه رسید شما رد شد. لطفاً با پشتیبانی در تماس باشید.");
-    }
-    bot.editMessageCaption("❌ رد شد", {
-      chat_id: chatId,
-      message_id: query.message.message_id,
-    });
+    await pool.query("UPDATE orders SET status=$1 WHERE id=$2", ["rejected", orderId]);
+    const { rows } = await pool.query("SELECT user_id FROM orders WHERE id=$1", [orderId]);
+    if (rows[0]) bot.sendMessage(rows[0].user_id, "❌ متأسفانه رسید شما رد شد. لطفاً با پشتیبانی در تماس باشید.");
+    bot.editMessageCaption("❌ رد شد", { chat_id: chatId, message_id: query.message.message_id });
   }
 });
 
-// ---------- دکمه‌های منو ----------
+// ---------- متن‌ها ----------
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
   if (!text) return;
 
-  // خرید محصول
   if (text === "🛒 خرید محصول") {
     return bot.sendMessage(chatId, "کدام محصول؟", {
       reply_markup: {
@@ -155,27 +160,23 @@ bot.on("message", async (msg) => {
     });
   }
 
-  // پشتیبانی
   if (text === "💬 پشتیبانی") {
     userState[chatId] = { step: "SUPPORT" };
     return bot.sendMessage(chatId, "📝 لطفاً پیام خود را ارسال کنید:");
   }
 
-  // خرید ها
   if (text === "📜 خرید ها") {
-    const { data: orders } = await supabase
-      .from("orders")
-      .select("*")
-      .eq("user_id", chatId)
-      .eq("status", "approved")
-      .order("created_at", { ascending: false });
+    const { rows } = await pool.query(
+      "SELECT * FROM orders WHERE user_id=$1 AND status='approved' ORDER BY created_at DESC",
+      [chatId]
+    );
 
-    if (!orders || orders.length === 0) {
+    if (rows.length === 0) {
       return bot.sendMessage(chatId, "شما هیچ خرید تایید شده‌ای ندارید.");
     }
 
     let message = "📜 خریدهای تایید شده شما:\n\n";
-    orders.forEach((o) => {
+    rows.forEach((o) => {
       message += `🔹 ${o.type} - مقدار: ${o.amount} - تاریخ: ${new Date(o.created_at).toLocaleDateString("fa-IR")}\n`;
     });
     return bot.sendMessage(chatId, message);
@@ -184,7 +185,6 @@ bot.on("message", async (msg) => {
   const state = userState[chatId];
   if (!state) return;
 
-  // دریافت مقدار تون
   if (state.step === "WAIT_TON_AMOUNT") {
     const amount = parseFloat(text);
     if (isNaN(amount) || amount < 0.1) {
@@ -195,7 +195,6 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, "💼 لطفاً آدرس ولت خود را وارد کنید:");
   }
 
-  // دریافت آدرس ولت تون
   if (state.step === "WAIT_TON_WALLET") {
     state.data.wallet = text;
     state.step = "WAIT_RECEIPT";
@@ -206,7 +205,6 @@ bot.on("message", async (msg) => {
     );
   }
 
-  // دریافت مقدار داگز
   if (state.step === "WAIT_DOGS_AMOUNT") {
     const amount = parseInt(text);
     if (isNaN(amount) || amount < 1000) {
@@ -217,7 +215,6 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, "🆔 لطفاً آیدی یوزرنیم خود را وارد کنید (مثلاً @username):");
   }
 
-  // دریافت یوزرنیم داگز
   if (state.step === "WAIT_DOGS_USERNAME") {
     state.data.username = text;
     state.step = "WAIT_RECEIPT";
@@ -228,7 +225,6 @@ bot.on("message", async (msg) => {
     );
   }
 
-  // پشتیبانی - ارسال به ادمین
   if (state.step === "SUPPORT") {
     await bot.sendMessage(
       ADMIN_ID,
@@ -244,24 +240,7 @@ bot.on("message", async (msg) => {
   }
 });
 
-// ---------- انتخاب تون / داگز ----------
-bot.on("callback_query", async (query) => {
-  const chatId = query.message.chat.id;
-
-  if (query.data === "buy_ton") {
-    userState[chatId] = { step: "WAIT_TON_AMOUNT" };
-    bot.answerCallbackQuery(query.id);
-    bot.sendMessage(chatId, "🔢 تعداد تون را وارد کنید (حداقل ۰.۱):");
-  }
-
-  if (query.data === "buy_dogs") {
-    userState[chatId] = { step: "WAIT_DOGS_AMOUNT" };
-    bot.answerCallbackQuery(query.id);
-    bot.sendMessage(chatId, "🔢 تعداد داگز را وارد کنید (حداقل ۱۰۰۰):");
-  }
-});
-
-// ---------- دریافت رسید (عکس) ----------
+// ---------- رسید ----------
 bot.on("photo", async (msg) => {
   const chatId = msg.chat.id;
   const state = userState[chatId];
@@ -273,22 +252,19 @@ bot.on("photo", async (msg) => {
   const photo = msg.photo[msg.photo.length - 1].file_id;
   const userData = state.data;
 
-  const { data: order, error } = await supabase
-    .from("orders")
-    .insert({
-      user_id: chatId,
-      type: userData.type,
-      amount: userData.amount,
-      wallet_address: userData.type === "TON" ? userData.wallet : null,
-      status: "pending",
-    })
-    .select()
-    .single();
+  const { rows } = await pool.query(
+    `INSERT INTO orders (user_id, type, amount, wallet_address, status)
+     VALUES ($1, $2, $3, $4, 'pending')
+     RETURNING *`,
+    [
+      chatId,
+      userData.type,
+      userData.amount,
+      userData.type === "TON" ? userData.wallet : null,
+    ]
+  );
 
-  if (error) {
-    console.log(error);
-    return bot.sendMessage(chatId, "❌ خطا در ثبت سفارش.");
-  }
+  const order = rows[0];
 
   const caption = `
 📥 سفارش جدید #${order.id}
