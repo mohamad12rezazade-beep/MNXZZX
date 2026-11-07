@@ -2,6 +2,8 @@ import os
 import logging
 import psycopg2
 import requests
+import subprocess
+import json
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from telegram import (
@@ -44,8 +46,7 @@ CARD_NUMBER = "6219861856357990"
 
 # ---------- تنظیمات قیمت ----------
 TON_FEE_PER_UNIT = 22000      # تومان کارمزد به ازای هر ۱ تون
-DOGS_PRICE_PER_UNIT = 2000    # تومان به ازای هر ۱ داگز
-USD_TO_TOMAN = 60000          # نرخ دلار به تومن (دستی)
+DOGS_PRICE_PER_UNIT = 2000    # تومان به ازای هر ۱ داگز (ثابت، طبق درخواست شما)
 
 user_state = {}
 
@@ -67,28 +68,63 @@ def db_query(sql, params=None, fetch=False):
         conn.close()
 
 
-# ---------- قیمت ----------
-def get_price_usd(coin_id: str) -> float:
+# ---------- قیمت TON از والکس (تومان) ----------
+def get_ton_toman() -> float:
+    """قیمت لحظه‌ای TON به تومان از API والکس"""
     try:
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        url = "https://api.wallex.ir/v1/markets"
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        return float(r.json()[coin_id]["usd"])
+        data = r.json()
+        # والکس معمولاً TON را با نماد TONIRT یا TONUSDT دارد
+        # سعی می‌کنیم TONIRT را پیدا کنیم
+        for symbol, info in data.get("result", {}).get("symbols", {}).items():
+            if symbol == "TONIRT":
+                return float(info["stats"]["lastPrice"])
+        # اگه TONIRT نبود، از TONUSDT استفاده کن و در نرخ دلار ضرب کن
+        logging.warning("TONIRT یافت نشد، از TONUSDT استفاده می‌شود")
+        return 0.0
     except Exception as e:
-        logging.error(f"خطا در گرفتن قیمت {coin_id}: {e}")
+        logging.error(f"خطا در دریافت قیمت TON: {e}")
         return 0.0
 
 
+# ---------- نرخ دلار از TGJU ----------
+def get_usd_toman() -> float:
+    """نرخ دلار بازار آزاد از TGJU (با tgju-mcp)"""
+    try:
+        result = subprocess.run(
+            ["tgju-mcp", "tj_get_prices", "price_dollar_rl"],
+            capture_output=True, text=True, timeout=20
+        )
+        data = json.loads(result.stdout)
+        # TGJU قیمت را به ریال می‌دهد، تقسیم بر ۱۰ = تومان
+        rial = float(data["price"])
+        return rial / 10
+    except Exception as e:
+        logging.error(f"خطا در دریافت نرخ دلار از TGJU: {e}")
+        # fallback: نرخ تقریبی
+        return 267000.0
+
+
 def calc_ton_price(amount_ton: float) -> int:
-    usd = get_price_usd("the-open-network")
-    if usd <= 0:
-        raise ValueError("قیمت تون دریافت نشد")
-    ton_toman = usd * USD_TO_TOMAN
+    """قیمت کل TON به تومان = مقدار × (قیمت TON به تومان + ۲۲۰۰۰)"""
+    ton_toman = get_ton_toman()
+    if ton_toman <= 0:
+        # اگه والکس جواب نداد، از نرخ دلار و قیمت CoinGecko استفاده کن
+        try:
+            url = "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd"
+            r = requests.get(url, timeout=10)
+            usd = float(r.json()["the-open-network"]["usd"])
+            ton_toman = usd * get_usd_toman()
+        except Exception as e:
+            raise ValueError(f"قیمت TON دریافت نشد: {e}")
     per_ton = ton_toman + TON_FEE_PER_UNIT
     return int(per_ton * amount_ton)
 
 
 def calc_dogs_price(amount_dogs: int) -> int:
+    """قیمت کل DOGS به تومان = تعداد × ۲۰۰۰ (ثابت)"""
     return int(amount_dogs * DOGS_PRICE_PER_UNIT)
 
 
@@ -410,7 +446,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ADMIN_ID, photo_file_id, caption=caption, reply_markup=keyboard
     )
     await update.message.reply_text(
-        "✅ رسید شما ارسال شد. پس از تایید ادمین به شما اطلاع داده می‌شود."
+        "✅ رسید شما ارسال شد. پس از تایید مدیر به شما اطلاع داده می‌شود."
     )
     del user_state[chat_id]
 
