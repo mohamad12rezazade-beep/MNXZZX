@@ -44,8 +44,8 @@ except ValueError:
 
 CARD_NUMBER = "6219861856357990"
 
-TON_FEE_PER_UNIT = 22000
-DOGS_PRICE_PER_UNIT = 2000  # fallback اگه API جواب نداد
+TON_FEE_PER_UNIT = 22000     # تومان کارمزد هر ۱ تون
+DOGS_FEE_PER_UNIT = 2        # تومان کارمزد هر ۱ داگز
 
 user_state = {}
 
@@ -115,7 +115,20 @@ def ensure_table():
         conn.close()
 
 
-# ---------- قیمت TON از والکس ----------
+# ---------- قیمت ----------
+def get_usd_toman() -> float:
+    try:
+        result = subprocess.run(
+            ["tgju-mcp", "tj_get_prices", "price_dollar_rl"],
+            capture_output=True, text=True, timeout=20
+        )
+        data = json.loads(result.stdout)
+        return float(data["price"]) / 10
+    except Exception as e:
+        logging.error(f"خطا در نرخ دلار: {e}")
+        return 267000.0
+
+
 def get_ton_toman() -> float:
     try:
         r = requests.get("https://api.wallex.ir/v1/markets", timeout=10)
@@ -128,19 +141,6 @@ def get_ton_toman() -> float:
     except Exception as e:
         logging.error(f"خطا در دریافت قیمت TON: {e}")
         return 0.0
-
-
-def get_usd_toman() -> float:
-    try:
-        result = subprocess.run(
-            ["tgju-mcp", "tj_get_prices", "price_dollar_rl"],
-            capture_output=True, text=True, timeout=20
-        )
-        data = json.loads(result.stdout)
-        return float(data["price"]) / 10
-    except Exception as e:
-        logging.error(f"خطا در نرخ دلار: {e}")
-        return 267000.0
 
 
 def calc_ton_price(amount_ton: float) -> int:
@@ -159,16 +159,29 @@ def calc_ton_price(amount_ton: float) -> int:
     return int(per_ton * amount_ton)
 
 
-# ---------- قیمت DOGS از والکس ----------
 def get_dogs_toman() -> float:
-    """قیمت لحظه‌ای DOGS به تومان از API والکس"""
+    """قیمت لحظه‌ای DOGS به تومان"""
     try:
         r = requests.get("https://api.wallex.ir/v1/markets", timeout=10)
         r.raise_for_status()
         data = r.json()
-        for symbol, info in data.get("result", {}).get("symbols", {}).items():
-            if symbol == "DOGSIRT":
-                return float(info["stats"]["lastPrice"])
+        symbols = data.get("result", {}).get("symbols", {})
+
+        if "DOGSIRT" in symbols:
+            return float(symbols["DOGSIRT"]["stats"]["lastPrice"])
+
+        if "DOGSUSDT" in symbols:
+            usdt_price = float(symbols["DOGSUSDT"]["stats"]["lastPrice"])
+            return usdt_price * get_usd_toman()
+
+        for symbol, info in symbols.items():
+            if "DOGS" in symbol.upper():
+                p = float(info.get("stats", {}).get("lastPrice", 0))
+                if p > 0:
+                    if "IRT" in symbol.upper():
+                        return p
+                    elif "USDT" in symbol.upper():
+                        return p * get_usd_toman()
         return 0.0
     except Exception as e:
         logging.error(f"خطا در دریافت قیمت DOGS: {e}")
@@ -176,11 +189,12 @@ def get_dogs_toman() -> float:
 
 
 def calc_dogs_price(amount_dogs: int) -> int:
-    """قیمت کل DOGS به تومان از API والکس"""
+    """قیمت DOGS = (قیمت لحظه‌ای + ۲ تومان کارمزد) × تعداد"""
     price = get_dogs_toman()
     if price <= 0:
-        raise ValueError("قیمت DOGS از والکس دریافت نشد")
-    return int(price * amount_dogs)
+        raise ValueError("قیمت DOGS دریافت نشد")
+    per_unit = price + DOGS_FEE_PER_UNIT
+    return int(per_unit * amount_dogs)
 
 
 # ---------- کیبوردها ----------
