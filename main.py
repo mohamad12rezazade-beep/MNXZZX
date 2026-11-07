@@ -45,7 +45,7 @@ except ValueError:
 CARD_NUMBER = "6219861856357990"
 
 TON_FEE_PER_UNIT = 22000
-DOGS_PRICE_PER_UNIT = 2000
+DOGS_PRICE_PER_UNIT = 2000  # fallback اگه API جواب نداد
 
 user_state = {}
 
@@ -91,7 +91,6 @@ def ensure_table():
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id bigint;")
             cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();")
 
-            # برداشتن NOT NULL از همه ستون‌هایی که ما پر نمی‌کنیم
             cur.execute("""
                 DO $$
                 DECLARE
@@ -116,7 +115,7 @@ def ensure_table():
         conn.close()
 
 
-# ---------- قیمت ----------
+# ---------- قیمت TON از والکس ----------
 def get_ton_toman() -> float:
     try:
         r = requests.get("https://api.wallex.ir/v1/markets", timeout=10)
@@ -160,8 +159,28 @@ def calc_ton_price(amount_ton: float) -> int:
     return int(per_ton * amount_ton)
 
 
+# ---------- قیمت DOGS از والکس ----------
+def get_dogs_toman() -> float:
+    """قیمت لحظه‌ای DOGS به تومان از API والکس"""
+    try:
+        r = requests.get("https://api.wallex.ir/v1/markets", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        for symbol, info in data.get("result", {}).get("symbols", {}).items():
+            if symbol == "DOGSIRT":
+                return float(info["stats"]["lastPrice"])
+        return 0.0
+    except Exception as e:
+        logging.error(f"خطا در دریافت قیمت DOGS: {e}")
+        return 0.0
+
+
 def calc_dogs_price(amount_dogs: int) -> int:
-    return int(amount_dogs * DOGS_PRICE_PER_UNIT)
+    """قیمت کل DOGS به تومان از API والکس"""
+    price = get_dogs_toman()
+    if price <= 0:
+        raise ValueError("قیمت DOGS از والکس دریافت نشد")
+    return int(price * amount_dogs)
 
 
 # ---------- کیبوردها ----------
@@ -371,7 +390,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount < 1000:
             await update.message.reply_text("❌ حداقل ۱۰۰۰ داگز وارد کنید.")
             return
-        total = calc_dogs_price(amount)
+        try:
+            total = calc_dogs_price(amount)
+        except ValueError as e:
+            await update.message.reply_text(f"❌ {e}. بعداً تلاش کنید.")
+            return
         state["data"] = {"amount": amount, "type": "DOGS", "total_toman": total}
         state["step"] = "WAIT_DOGS_USERNAME"
         await update.message.reply_text(
